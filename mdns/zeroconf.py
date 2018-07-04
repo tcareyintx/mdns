@@ -254,8 +254,9 @@ def text_to_dict(text):
         strs.append(text[index:index + length])
         index += length
 
+    # FIXME: TCarey Change properties are in byte strings
     for s in strs:
-        eindex = s.find('=')
+        eindex = s.find(b'=')
         if eindex == -1:
             # No equals sign at all
             key = s
@@ -263,10 +264,11 @@ def text_to_dict(text):
         else:
             key = s[:eindex]
             value = s[eindex + 1:]
-            if value == 'true':
+            if value == b'true':
                 value = 1
-            elif value == 'false' or not value:
+            elif value == b'false' or not value:
                 value = 0
+        # End TCarey Change
 
         # Only update non-existent properties
         if key and result.get(key) == None:
@@ -539,7 +541,7 @@ class DNSAddress(DNSRecord):
         if self.family == 4:
             a = socket.inet_ntoa(self.address)
         elif self.family == 6:
-            a = "%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x" % \
+            a = "%dnssd:%dnssd:%dnssd:%dnssd:%dnssd:%dnssd:%dnssd:%dnssd:%dnssd:%dnssd:%dnssd:%dnssd:%dnssd:%dnssd:%dnssd:%dnssd" % \
                     struct.unpack('BBBBBBBBBBBBBBBB', self.address)
         else:
             raise Exception("Unknown IP address family")
@@ -901,8 +903,10 @@ class DNSOutgoing(object):
 
     def add_answer(self, inp, record):
         """Adds an answer"""
-        if not record.suppressed_by(inp):
-            self.add_answer_at_time(record, 0)
+        # FIXME: TCarey Change: Added record is not None protection
+        if record is not None:
+            if not record.suppressed_by(inp):
+                self.add_answer_at_time(record, 0)
 
     def add_answer_at_time(self, record, now):
         """Adds an answer if if does not expire by a certain time"""
@@ -923,6 +927,8 @@ class DNSOutgoing(object):
     def write_byte(self, value):
         """Writes a single byte to the packet"""
         format = '!B'
+        if value < 0 or value > 255:
+            print("WARNING, WARNING.... Byte is > 255 or < 0")
         self.data.append(struct.pack(format, value))
         self.size += 1
 
@@ -1033,8 +1039,12 @@ class DNSOutgoing(object):
                 self.write_record(answer, time)
             for authority in self.authorities:
                 self.write_record(authority, 0)
+            # FIXME: TCarey Check for a None record
+            self.additionals =\
+                    list(filter(lambda x: type(x)!= None, self.additionals))
             for additional in self.additionals:
-                self.write_record(additional, 0)
+                if additional is not None:
+                    self.write_record(additional, 0)
 
             self.insert_short(0, len(self.additionals))
             self.insert_short(0, len(self.authorities))
@@ -1092,6 +1102,18 @@ class DNSCache(object):
             return list[list.index(entry)]
         except:
             return None
+
+    def get_by_type(self, stype):
+        """Gets all the entries for a certain type."""
+        stypes = []
+        try:
+            for _, ci in self.cache.items():
+                for rec in ci:
+                    if rec.type == stype:
+                        stypes.append(rec)
+        except:
+            pass
+        return stypes
 
     def get_by_details(self, name, type, clazz):
         """Gets an entry by details.  Will return None if there is
@@ -1351,7 +1373,15 @@ class ServiceInfo(object):
         server: fully qualified name for service host (defaults to name)"""
 
         if not name.endswith(type):
-            raise BadTypeInNameException
+            # TCarey begin - check for subtypes
+            stypet = type.split('_sub.', 1)
+            if len(stypet) != 2:
+                raise BadTypeInNameException
+            else:
+                _, stype = stypet
+                # TCarey end - check for subtypes
+                if not name.endswith(stype):
+                    raise BadTypeInNameException
         self.type = type
         self.name = name
         self.signer = signer
@@ -1455,7 +1485,9 @@ class ServiceInfo(object):
         """Updates service information from a DNS record"""
         if record is not None and not record.is_expired(now):
             if record.type == _TYPE_A:
-                if record.name == self.name:
+                # FIXME: TCarey Change Modified the self.name to self.server
+                if record.name == self.server:
+                    # End TCarey Change
                     if not record.address in self.address:
                         self.address.append(record.address)
             elif record.type == _TYPE_SRV:
@@ -1569,7 +1601,7 @@ class Heartbeat(Thread):
     def notify_all(self):
         """Notifies all waiting threads"""
         self.condition.acquire()
-        # python 3.x
+        # python 3.dnssd
         try:
             self.condition.notify_all()
         except:
@@ -1702,21 +1734,28 @@ class Zeroconf(object):
     def notify_all(self):
         """Notifies all waiting threads"""
         self.condition.acquire()
-        # python 3.x
+        # python 3.dnssd
         try:
             self.condition.notify_all()
         except:
             self.condition.notifyAll()
         self.condition.release()
 
-    def get_service_info(self, type, name, timeout=3000):
+    # FIXME: TCarey Change - Added server property
+    def get_service_info(self, type, name, server=None,
+                         require_text=False, timeout=3000):
         """Returns network's service information for a particular
         name and type, or None if no service matches by the timeout,
         which defaults to 3 seconds."""
-        info = ServiceInfo(type, name)
+        info = ServiceInfo(type, name, server=server)
+        if require_text is True:
+            info.properties = None
+            info.text = None
+
         if info.request(self, timeout):
             return info
         return None
+    # End TCarey Change
 
     def add_serviceListener(self, type, listener):
         """Adds a listener for a particular service type.  This object
@@ -1803,12 +1842,50 @@ class Zeroconf(object):
             iterations -= 1
             next_time += _REGISTER_TIME
 
+    # TCarey change
+    def num_srv_rec_for_server(self, server):
+        """ Return the number of unexpired service records for a server"""
+        num = 0
+        stypes = self.cache.get_by_type(_TYPE_SRV)
+        now = current_time_millis()
+        if stypes is not None:
+            for stype in stypes:
+                if ((stype.server == server) and
+                        (stype.is_expired(now) is False)):
+                    num += 1
+        return num
+
+    def num_ptr_rec_for_srv_inst(self, sname):
+        """ Return the num of unexpired ptr records for a service instance"""
+        num = 1
+        ptrs = self.cache.get_by_type(_TYPE_PTR)
+        now = current_time_millis()
+        if ptrs is not None:
+            for ptr in ptrs:
+                if ((ptr.alias == sname) and
+                        (ptr.is_expired(now) is False)):
+                    num += 1
+        return num
+    # End TCarey change
+
     def unregister_service(self, info):
         """Unregister a service."""
         try:
             del(self.services[info.name.lower()])
         except:
             pass
+
+        # TCarey change - Do not unregister the Type A
+        # Sending out the DNS requests looses the Type A
+        # Record that is shared with other services
+        send_A = False
+        send_SRV = False
+        if self.num_srv_rec_for_server(info.server) <= 1:
+            send_A = True
+        if self.num_ptr_rec_for_srv_inst(info.name) <= 1:
+            send_SRV = True
+        # End TCarey change
+
         now = current_time_millis()
         next_time = now
         i = 0
@@ -1821,21 +1898,27 @@ class Zeroconf(object):
             out.add_answer_at_time(
                     DNSPointer(info.type,
                         _TYPE_PTR, _CLASS_IN, 0, info.name), 0)
-            out.add_answer_at_time(
-                    DNSService(info.name,
-                        _TYPE_SRV, _CLASS_IN, 0, info.priority,
-                        info.weight, info.port, info.name), 0)
-            out.add_answer_at_time(
-                    DNSText(info.name, _TYPE_TXT, _CLASS_IN, 0, info.text), 0)
-            for k in info.address:
+            # TCarey Change - the server on the Service record shouldnt be name
+            if send_SRV:
                 out.add_answer_at_time(
-                        DNSAddress(info.server, _TYPE_A, _CLASS_IN, 0, k), 0)
+                        DNSService(info.name,
+                            _TYPE_SRV, _CLASS_IN, 0, info.priority,
+                            info.weight, info.port, info.server), 0)
+                out.add_answer_at_time(
+                        DNSText(info.name, _TYPE_TXT, _CLASS_IN, 0, info.text), 0)
+            if send_A:
+                for k in info.address:
+                    out.add_answer_at_time(
+                            DNSAddress(info.server, _TYPE_A, _CLASS_IN, 0, k), 0)
+            # End TCarey Change
             self.send(out)
             i += 1
             next_time += _UNREGISTER_TIME
 
     def unregister_all_services(self):
+        # FIXME: TCarey Change - Service were getting too big
         """Unregister all registered services."""
+        """
         if len(self.services) > 0:
             now = current_time_millis()
             next_time = now
@@ -1864,6 +1947,14 @@ class Zeroconf(object):
                 self.send(out)
                 i += 1
                 next_time += _UNREGISTER_TIME
+        """
+        # FIXME: TCarey Change Fix because services were getting to big 
+        infos = []
+        for info in self.services.values():
+            infos.append(info)
+        for info in infos:
+            self.unregister_service(info)
+        # End TCarey Change
 
     def check_service(self, info):
         """Checks the network for a unique service name, modifying the
@@ -2025,6 +2116,17 @@ class Zeroconf(object):
                                 except:
                                     pass
                             entry.reset_ttl(e)
+                        else:
+                            # FIXME: TCarey Change to add this record to the cache
+                            self.cache.add(e)
+                            for i in self.hooks:
+                                try:
+                                    i.add(e)
+                                except:
+                                    pass
+                            entry = self.cache.get(e)
+                            entry.reset_ttl(e)
+                            # End TCarey Change
                 else:
                     self.cache.add(e)
                     for i in self.hooks:
